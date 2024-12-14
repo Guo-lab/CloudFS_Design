@@ -1,0 +1,403 @@
+\documentclass[10pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+\usepackage{geometry}
+% \geometry{a4paper, margin=1in}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{times} % Use Times New Roman font
+
+\usepackage{setspace} % For controlling line spacing
+% \usepackage[margin=1in]{geometry} % Set 1-inch margins
+
+% Set single spacing
+% \singlespacing
+
+\geometry{
+    a4paper,
+    margin=1in
+}
+
+% Paragraph spacing
+\setlength{\parskip}{0.4em}  % Space between paragraphs
+\setlength{\parindent}{0pt}  % Remove paragraph indentation
+
+% \singlespacing
+
+\title{18746 Project - CloudFS Implementation Report}
+\author{Siqi (Edward) Guo, AndrewID: siqiguo}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+
+\subsection*{Introduction}
+As the demand for scalable, efficient, and cost-effective storage solutions grows,
+the integration of cloud storage with local file systems has emerged as a promising approach.
+CloudFS, a cloud-backed local file system,
+bridges the gap between high-performance local storage and the virtually infinite capacity of cloud services.
+By taking advantages of local solid-state disks (SSD) and cloud storage,
+CloudFS aims to deliver a seamless, efficient, and robust storage solution.
+
+In this project, we developed single-threaded CloudFS, using the FUSE framework, and incorporating S3 service API,
+\texttt{archive-lib}, \texttt{libfuse}, and several other useful libraries.
+
+
+\subsection*{System Overview}
+CloudFS, and by extension this project, consists of four components: a core file system leveraging the
+properties of local SSD and cloud storage for making data placement decisions; a component that takes
+advantage of redundancy in data to reduce storage capacity; a component that adds the ability to create,
+delete, and restore file system snapshots while minimizing cloud storage costs; and a component that uses
+local on-device and in-memory caching to improve performance and reduce cloud operation costs. \\
+Based on the above hints from the handout, I designed the whole CloudFS with four following main components.
+
+\begin{enumerate}
+    \item \textbf{Cloud File System Handler}: This module serves as the interface for file operations, managing metadata and coordinating data placement across local and cloud storage.
+    \item \textbf{Deduplication Manager}: This component holds the chunk's state. By identifying and eliminating duplicate data, it minimizes storage usage and optimizes data transfer. It also maintains a Chunk Manager to manage the file system buffer and assist itself to upload and download chunks.
+    \item \textbf{Cache Manager}: This module implements caching strategies to store frequently accessed data locally, reducing cloud access latency and costs.
+    \item \textbf{Snapshot Manager}: This component provides versioning capabilities, enabling users to create and manage snapshots efficiently.
+\end{enumerate}
+
+\vspace{-0.05cm}
+\newpage
+
+\subsubsection*{Cloud File System UML Diagram}
+Here is the UML diagram of the CloudFS design.  The following diagram illustrates the architecture of CloudFS, highlighting the relationships between its main components and their interactions. \\
+
+\includegraphics*[width=\textwidth]{./out/CloudFS_UML/CloudFS_UML.png}
+% \include{./out/CloudFS_UML/CloudFS_UML}
+
+\subsubsection*{CLouFS Components Design and System Framewrok}
+The second figure complements this by elaborating on the responsibilities of each component, offering a detailed perspective on how they contribute to the system's operations. Together, these figures provide a comprehensive view of the CloudFS architecture.
+
+Here is the role of each component in the CloudFS: \\
+
+\includegraphics*[width=\textwidth]{./out/System.png}
+
+\newpage
+% \subsubsection*{}
+\vspace{0.6em}
+\subsection*{Detailed Design, Policies, and Justifications}  \vspace{0.6em}
+\subsubsection*{Checkpoint 1: Hybrid file system spanning SSD and cloud storage}  \vspace{-0.6em}
+In the first checkpoint of this project, I implemented the framework of the CloudFS, a simple hybrid file system with two different
+storage components: a local SSD and a cloud storage service similar to Amazon S3.
+
+\textbf{Data Placement.}
+The necessary metadata of a file will be stored on the local SSD and the file content will first be placed on local device.
+The file will be transferred to the cloud storage when this file grows beyond a threshold
+and the file system namespace on the SSD will be updated using a user-defined link.
+Similarly, the file content will be downloaded from the cloud storage to the local device when that file shrinks below the threshold and the cloud storage will be cleared to save more space.
+
+\textbf{Handler Implementation.} CloudFS is a FUSE-based file system, most of the code will be written to implement functions
+called through the VFS interface.
+I built a working prototype using a subset of VFS calls including \texttt{getattr}, \texttt{getxattr},
+\texttt{setxattr}, \texttt{mkdir}, \texttt{mknod}, \texttt{open}, \texttt{read}, \texttt{write}, \texttt{release}, \texttt{opendir}, \texttt{readdir}, \texttt{init}, \texttt{destroy},
+\texttt{access}, \texttt{utimens}, \texttt{chmod}, \texttt{link}, \texttt{symlink}, \texttt{readlink}, \texttt{unlink}, \texttt{rmdir}, and \texttt{truncate}.
+
+\textbf{Metadata.} One necessary file metadata will be the file's size, which determines its storage location.
+CloudFS-specific metadata is stored in the file's extended attributes and is consistently updated on non-volatile storage to ensure reliability. Additionally, a mapping is maintained between the local file identifier and its corresponding storage position in the cloud. To minimize overhead, I implemented a fixed mapping scheme, eliminating the need for persisting this mapping in checkpoint 1.
+
+
+\subsubsection*{Checkpoint 2: Block Level Deduplication} \vspace{-0.6em}
+Recall that the cloud storage, request to the Cloud, and data transfer via Cloud Service are expensive, so we need to reduce the storage usage and communication costs via Cloud API as much as possible. We notice that the data redundancy is a common issue in the file system, so we decide to implement a deduplication manager to eliminate the data redundancy, reduce the storage usage, and optimize data transfer.
+
+\textbf{Granularity of Deduplication.} In this checkpoint, I implemented a block-level deduplication scheme. The file content is divided into similar-size segments (blocks), and the deduplication manager identifies these duplicate blocks and stores them only once.
+The deduplication manager maintains a hash table to track the unique blocks and their global reference counts.
+This lookup table will be used to search for duplicate segments.
+Another table is used to track the identifiers (e.g. MD5 of the chunk) of all segments and all necessary metadata of those corresponding segments in each local file.
+
+\textbf{When and How to Chunk the File.} The entire file will be chunked into blocks when it is larger than the threshold for the first time.
+If a file is known to be on the cloud, the file's relevant segments will be downloaded first no matter for the consequent \texttt{read} or \texttt{write}.
+After a \texttt{write}, the local copy of those downloaded content will be modified and rechunked into new blocks.
+The chunking process is done by the Chunk Manager with Rabin's algorithm. As Rabin calculates the hash value of the segment based on the content, the same contents in any files will be actually stored once.
+Multiple identical segments will only increment the global chunk reference count. In this way, the files in the CloudFS get deduplicated to the largest extent.
+
+\textbf{Trade-off between cloud usage and data transfer costs.}
+Ideally, after write, Chunker needs to keep downloading consequent segments to construct continuous blocks in the buffer, and rechunking until the Chunker finds an existing boundary.
+However, I simplified the process by only chunking the downloaded segments,
+which is not the best choice, but is efficient enough for the current implementation. The trade-off is between the efficiency of deduplication and the cost of data transfer.
+Without precise deduplication, the cloud usage will be increased, but the data transfer costs will be minimized.
+As the data transfer is more expensive, I intended to reduce the data transfer costs with my simplification.
+
+\textbf{The Right Average Segment Size for Deduplication.}
+Larger the segment size, less cost to maintain the lookup table, faster to search the deduplicated chunks, but less likely to find duplicates. The average segment size should be chosen based on the trade-off between the deduplication efficiency and the overhead of maintaining and searching the hash table. In my implementation, I chose 4KB as the average segment size, which is a common choice in the industry and this project.
+
+\vspace{0.5cm}
+\subsubsection*{Checkpoint 3: Snapshots \& Cache in CloudFS}
+
+\textbf{Snapshots Management.}
+In this checkpoint, I implemented the Snapshot Manager to support the IOCTL functions in CloudFS.
+The Snapshot Manager maintains a list of snapshots for each file and provides functionalities to create, delete, restore, install, and uninstall snapshots.
+
+Creates a snapshot of the CloudFS by archiving the snapshot input directory and
+uploading it to the cloud. Updates deduplication information to pin chunks associated
+with the snapshot.
+
+Restores a snapshot by retrieving the associated tar file from the cloud and
+extracting it. Clean the old directory before extracting the tar file to restore one
+snapshot.
+
+Deletes a snapshot by deleting the associated tar file from the cloud and updating all snapshots' metadata.
+
+Other functions like \texttt{install}, \texttt{list}, and \texttt{uninstall} are also implemented to support the snapshot management.
+
+\vspace{0.5cm}
+\textbf{Cache Management.}
+To further optimize the CloudFS performance and reduce the cloud costs,
+I implemented the Least Recently Used (LRU) write-back cache in the CloudFS.
+Cache will store the frequently accessed chunks locally to reduce the cloud access frequency and costs. In this case, uploading will only happen when there is an eviction and downloading will only happen when the chunk is not found in the cache.
+
+What is worth mentioning is that the cache policy is implemented very easy in this checkpoint,
+as my unintentional design in the previous checkpoints is well extensible to support the cache.
+Previously, the Deduplication Manager has already relied on the Chunk Manager to manage the buffer for uploading and downloading chunks one by one,
+now I just need to redirect the buffer to the cache file to maintain the separate chunk as the cache node in the cache container.
+
+Given the cache policy must have no memory-based component,
+the cache metadata also needs persistency across mounts, just as the same as snapshot metadata and chunk metadata.
+
+\textbf{Performance Improvement.}
+After implementing the cache, the CloudFS performance is significantly improved. We could observe a reduced cost from 28.7\$ to 15.4\$ in the provided test cases on the AutoLab.
+
+\vspace{-0.2cm}
+\subsection*{Conclusion}
+In this project, I implemented a CloudFS that bridges the gap between local SSD and cloud storage, featuring a hybrid-scheme file placement, block-level deduplication, snapshots, and cache management.
+
+% \vspace{-0.5cm}
+% \subsection*{Appendix}
+% \vspace{-0.2cm}
+% \subsubsection*{}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% \subsection*{System Overview}
+% \vspace{-0.05cm}
+% \subsubsection*{Components}
+% The \texttt{MyFTL} system consists of several key components:
+% \vspace{-0.05cm}
+% \begin{itemize}
+%     \setlength{\itemsep}{0pt}
+%     \item \textbf{AddressTranslator}: Manages the page-level mapping between Logical Block Addresses (LBA) and Physical Page Addresses (PPA).
+%     \item \textbf{BlockMetadata}: Stores metadata for each block, including erase counts, current page count, block index (enhance lookup efficiency), and valid page information.
+%     \item \textbf{BlockManager}: Oversees block operations, such as selecting blocks for writing, garbage collection, and wear leveling.
+%     \item \textbf{MyFTL}: The main FTL class that integrates all components to handle read, write, and trim operations.
+% \end{itemize}
+
+% % \includegraphics[width=\textwidth]{./ftl.png}
+
+% I have discussed some high-level ideas with my friends, and we noticed that in this final project, we need to optimize FTL under specific configurations and the size of the final SSD is relatively small. Then we agreed on that instead of using complex hybrid log block mapping scheme, a simple mapping scheme with greedy block selection for wear-leveling should be better and more efficient, given the final tests have stressed tests for not only write amplification, but also memory usage and block endurance.
+
+% The following sections will dive into the policies and detailed design of each component and justify those design choices.
+
+% \subsection*{Detailed Design, Policies, and Justifications}
+
+% \subsubsection*{Page-Level Mapping Scheme}
+% I use the checkpoint-3 test cases to test the checkpoint 2 implementation it turns out that the endurance constraint is very strict under random writes and some other strict write amplification constraints. Given this, I consider using a finer-grained mapping scheme to be more flexible in data placement and more efficient to perform wear leveling and garbage collection.
+% The page-level mapping should be able to reduce the write-amplification and improve the endurance of the SSD.
+
+% Before this, I need to optimize the memory usage of my implementation first as the page-level mapping scheme will consume more memory than the hybrid log mapping scheme.
+% I notice with provided SSD configuration, there are maximum 40960 pages, so we only need \texttt{uint16\_t} to represent the PPA.
+% In this way, the memory overhead is reduced to 2 bytes per page.
+
+% Besides, compared to the hybrid log mapping scheme in last checkpoint, I decide to use vector to store the mapping information, rather than the unordered map.
+% This is because the entry memory overhead of
+% unordered map, including pointers, bucket management, etc., which might be more than 10 times than a simple vector.
+
+% After the optimization, the memory overhead of the page-level mapping scheme is acceptable.
+
+
+% \subsubsection*{Garbage Collection \& Wear-Leveling Policies}
+% To make sure the garbage collection and wear leveling are efficient, I decide to use a simple greedy block selection policy.
+% Noted that read and trim operations will not trigger the garbage collection, and each write will attempt to attain the next block (or more accurately, the next PPA) in the block pools before garbage collection. \\
+% Once the write operation fails to find a valid PPA, the garbage collection will be triggered. There is always a cleaning block reserved for garbage collection. We will choose the least erased block with fewer valid pages to be the block to clean (considering wear-leveling here). Copy the contents in the clean block (candidate block in my implementation) to the cleaning block. After that, we will erase the candidate block and update the block metadata. Finally, the last candidate block will be the new cleaning block and the last cleaning block will have space to do next write. \\
+% The greedy selection is supported by a vector-based max-heap. The heap is built based on erase counts left and the number of valid pages in each block and rebuilt at each garbage collection (resorted).
+
+% It is obvious that the above wear-leveling policy is based on a greedy policy, which is simple and efficient enough.
+% What is worth mentioning is that at first I did not consider the block with all valid pages as the candidate block to clean, as I thought it will not save any more space.
+% Nevertheless, after some tests, I found that it might be better to clean the block with all valid pages,
+% as those blocks with all valid pages might impede the re-usage of themselves even if they still have many erase counts left.
+% Although cleaning those blocks might hurt the write-amplification more, it will save us from implementing hot-cold separators or other complex strategies to make the blocks wore out evenly. It is a trade-off between write-amplification and endurance.
+
+% Finally, except for the above designs mentioned such as candidate selection, data relocation, block erasure, and heap rebuilding during garbage collection, etc.,
+% I also implement trim to reduce write amplification and facilitates endurance.
+
+% % \subsubsection*{Data Structures}
+% % \subsubsection*{Key Functions}
+% % \begin{description}
+% %     \item[\texttt{AddressTranslator(size\_t max\_lba)}] \hfill \\
+% %     Initializes the LBA to PPA mapping vector with a size of \texttt{max\_lba}, setting all entries to \texttt{INVALID\_PPA}.
+% %     \item[\texttt{void InsertLBA2PPA(size\_t lba, uint16\_t ppa)}] \hfill \\
+% %     Inserts or updates the mapping from a given LBA to a PPA.
+% %     \item[\texttt{bool IsLBA2PPAExist(size\_t lba) const}] \hfill \\
+% %     Checks if a valid PPA mapping exists for the given LBA.
+% %     \item[\texttt{uint16\_t GetPPAfromLBA(size\_t lba) const}] \hfill \\
+% %     Retrieves the PPA corresponding to the given LBA.
+% %     \item[\texttt{void RemoveLBA2PPA(size\_t lba)}] \hfill \\
+% %     Removes the mapping for the specified LBA by setting its PPA to \texttt{INVALID\_PPA}.
+% %     \item[\texttt{void UpdateLBA2PPA(uint16\_t prev\_ppa, uint16\_t new\_ppa)}] \hfill \\
+% %     Updates all occurrences of \texttt{prev\_ppa} with \texttt{new\_ppa} in the mapping.
+% % \end{description}
+
+% % \subsection*{BlockMetadata}
+% % \label{sec:block_metadata}
+% % \subsubsection*{Purpose}
+% % The \texttt{BlockMetadata} structure holds metadata information for each block in the SSD. This includes the number of remaining erases, the count of valid pages, the block index, and a bitmap indicating the validity of each page within the block.
+
+% % \subsubsection*{Data Members}
+% % \begin{itemize}
+% %     \item \texttt{uint8\_t erase\_left\_}: Number of remaining erase cycles for the block.
+% %     \item \texttt{uint8\_t page\_count\_}: Number of pages currently used in the block.
+% %     \item \texttt{uint16\_t block\_idx\_}: Unique identifier for the block.
+% %     \item \texttt{std::bitset<64> valid\_pages\_}: Bitmap tracking the validity of each page in the block.
+% % \end{itemize}
+% % \subsubsection*{Constructors}
+% % \begin{description}
+% %     \item[\texttt{BlockMetadata()}] \hfill \\
+% %     Default constructor initializing all members to zero.
+% %     \item[\texttt{BlockMetadata(uint8\_t max\_erase, uint16\_t idx)}] \hfill \\
+% %     Initializes the block with a maximum erase count and a block index.
+% % \end{description}
+% % \subsection*{BlockManager}
+% % \label{sec:block_manager}
+% % \subsubsection*{Purpose}
+% % The \texttt{BlockManager} class manages all blocks within the SSD. It is responsible for selecting blocks for writing, performing garbage collection, and maintaining the heap structure based on block metadata.
+% % \subsubsection*{Data Structures}
+% % \begin{itemize}
+% %     \item \texttt{std::vector<BlockMetadata> blocks\_}: A vector storing metadata for all blocks.
+% % \end{itemize}
+
+% % \subsubsection*{Key Functions}
+% % \begin{description}
+% %     \item[\texttt{BlockManager(uint16\_t num\_blocks, uint8\_t max\_erase)}] \hfill \\
+% %     Initializes the block manager with a specified number of blocks and sets their maximum erase counts.
+
+% %     \item[\texttt{void IncrementBlockEraseCount(uint16\_t block\_idx)}] \hfill \\
+% %     Decrements the remaining erase count for a specified block.
+
+% %     \item[\texttt{BlockMetadata* GetBlockMetadata(uint16\_t block\_idx)}] \hfill \\
+% %     Retrieves the metadata for a specific block by its index.
+
+% %     \item[\texttt{BlockMetadata* GetCleaningBlock()}] \hfill \\
+% %     Returns the current cleaning block, typically the first block in the vector.
+
+% %     \item[\texttt{BlockMetadata* GetBlockWithLeastErases(uint8\_t pages\_per\_block)}] \hfill \\
+% %     Finds and returns the block with the least number of erases and fewer valid pages than the specified limit.
+
+% %     \item[\texttt{BlockMetadata* GetCandidateBlocksForGC()}] \hfill \\
+% %     Identifies and returns a candidate block for garbage collection based on erase counts and valid page distribution.
+
+% %     \item[\texttt{void RebuildHeap()}] \hfill \\
+% %     Reconstructs the heap structure of blocks to prioritize blocks with fewer erase cycles and more invalid pages.
+
+% %     \item[\texttt{void PrintInfo()}] \hfill \\
+% %     Outputs the current state of all blocks for debugging purposes.
+
+% %     \item[\texttt{bool IfGarbageCollectFailure()}] \hfill \\
+% %     Checks if garbage collection has failed by verifying if all blocks have exhausted their erase cycles.
+% % \end{description}
+
+% % \subsection*{MyFTL Class}
+% % \label{sec:myftl_class}
+
+% % \subsubsection*{Purpose}
+% % The \texttt{MyFTL} class implements the Flash Translation Layer, handling read, write, and trim operations. It integrates the \texttt{AddressTranslator} and \texttt{BlockManager} to manage data storage and ensure efficient utilization of flash memory.
+
+% % \subsubsection*{Data Members}
+% % \begin{itemize}
+% %     \item \texttt{const ConfBase *conf\_}: Pointer to the configuration object containing SSD parameters.
+% %     \item \texttt{uint16\_t total\_pages\_}: Total number of pages in the SSD.
+% %     \item \texttt{uint16\_t total\_blocks\_}: Total number of blocks in the SSD.
+% %     \item \texttt{AddressTranslator addr\_translator\_}: Instance managing LBA to PPA mappings.
+% %     \item \texttt{BlockManager block\_mgr\_}: Instance managing block operations.
+% % \end{itemize}
+
+% % \subsubsection*{Key Functions}
+% % \begin{description}
+% %     \item[\texttt{MyFTL(const ConfBase *conf)}] \hfill \\
+% %     Constructor that initializes the FTL with the provided configuration and sets up necessary parameters.
+% %     \item[\texttt{virtual \textasciitilde{}MyFTL()}] \hfill \\
+% %     Virtual destructor to allow proper cleanup when deleting through a base class pointer.
+% %     \item[\texttt{std::pair<ExecState, Address> ReadTranslate(size\_t lba, const ExecCallBack<PageType> \&func)}] \hfill \\
+% %     Translates an LBA for a read operation. Returns a pair indicating the execution state and the translated address.
+% %     \item[\texttt{std::pair<ExecState, Address> WriteTranslate(size\_t lba, const ExecCallBack<PageType> \&func)}] \hfill \\
+% %     Translates an LBA for a write operation. Handles updating mappings and valid bits.
+% %     \item[\texttt{ExecState Trim(size\_t lba, const ExecCallBack<PageType> \&func)}] \hfill \\
+% %     Marks an LBA as garbage, invalidating its corresponding PPA and removing the mapping.
+% %     \item[\texttt{bool IsAddressAccessible(size\_t lba)}] \hfill \\
+% %     Checks if the given LBA is within the accessible range of the SSD.
+% %     \item[\texttt{BlockMetadata* GarbageCollect(const ExecCallBack<PageType> \&func)}] \hfill \\
+% %     Performs garbage collection by relocating valid pages and erasing blocks.
+% %     \item[\texttt{BlockMetadata* GetAvailableBlock(const ExecCallBack<PageType> \&func)}] \hfill \\
+% %     Retrieves the next available block for writing, performing garbage collection if necessary.
+% %     \item[\texttt{uint16\_t GetAvailablePPA(const ExecCallBack<PageType> \&func)}] \hfill \\
+% %     Obtains the next available Physical Page Address (PPA) for writing data
+% %     \item[\texttt{void ModifyPageValidBitInBlock(uint16\_t ppa, bool is\_valid)}] \hfill \\
+% %     Sets or resets the valid bit for a specific page within a block.
+% %     \item[\texttt{Address GetAddressFromPPA(uint16\_t ppa)}] \hfill \\
+% %     Converts a Physical Page Address (PPA) to a structured \texttt{Address} object containing package, die, plane, block, and page indices.
+% %     \item[\texttt{void InitializeParameters()}] \hfill \\
+% %     Initializes FTL parameters based on the SSD configuration.
+% % \end{description}
+
+% % \subsection*{Interface Description}
+
+% % \subsection*{CreateMyFTL Function}
+% % \label{sec:create_myftl}
+
+% % \begin{lstlisting}[language=C++, caption={CreateMyFTL Function}]
+% % FTLBase<TEST_PAGE_TYPE> *CreateMyFTL(const ConfBase *conf) {
+% %     MyFTL<TEST_PAGE_TYPE> *ftl = new MyFTL<TEST_PAGE_TYPE>(conf);
+% %     return static_cast<FTLBase<TEST_PAGE_TYPE> *>(ftl);
+% % }
+% % \end{lstlisting}
+
+% % \subsubsection*{Description}
+% % The \texttt{CreateMyFTL} function instantiates the \texttt{MyFTL} class with the provided configuration and returns a pointer to the base FTL class. This allows for polymorphic behavior, enabling the use of different FTL implementations interchangeably.
+
+% % \subsubsection*{Parameters}
+% % \begin{description}
+% %     \item[\texttt{const ConfBase *conf}] \hfill \\
+% %     Pointer to the configuration object containing SSD parameters such as size, package size, die size, plane size, block size, and maximum erase counts.
+% % \end{description}
+
+% % \subsubsection*{Return Value} 
+
+% % \subsection*{Garbage Collection}
+% % Garbage collection (GC) is a critical process in FTLs to reclaim space from invalid or stale data. In the \texttt{MyFTL} implementation, GC involves the following steps:
+
+% % \begin{enumerate}
+% %     \item \textbf{Candidate Selection}: The \texttt{BlockManager} identifies a candidate block with the most invalid pages and the fewest remaining erase cycles.
+% %     \item \textbf{Data Relocation}: Valid pages from the candidate block are moved to a cleaning block. This involves reading the valid data and writing it to new locations.
+% %     \item \textbf{Block Erasure}: Once all valid data is relocated, the candidate block is erased, resetting its state and marking it as available for future writes.
+% %     \item \textbf{Heap Rebuilding}: After GC, the block heap is rebuilt to maintain the priority of blocks based on erase counts and valid page counts.
+% % \end{enumerate}
+% \vspace{-0.2cm}
+% \subsection*{Discussion \& Conclusion}
+% The \texttt{MyFTL} implementation provides a customized framework for managing flash memory operations, including address translation, block management,
+% and garbage collection with a proper wear leveling policy. \\
+% To analyze the best and worst workload scenarios, I have tested the FTL implementation under various configurations and workloads. \\
+% The best workload is uniform random writes, as in this case, the wear leveling is most effective and the write amplification is specifically minimized. \\
+% The worst workload is non-uniform write patterns, which might arise primarily due to the presence of hot and cold data. In this case our simple greedy wear leveling policy might not be the best choice, as it might lead to cold data partition not being used and hot data partition being overused.
+
+% \vspace{-0.5cm}
+% \subsection*{Appendix}
+% \vspace{-0.2cm}
+% \subsubsection*{Visualization Tool: SSDPlayer}
+% \vspace{-0.2cm}
+% In the project, I like the visualization tool \texttt{SSDPlayer} the most.  \\
+
+% % \includegraphics[width=\textwidth]{visualization.jpg} \\
+
+
+% \hspace{-0.76cm} It provides a clear visualization of the FTL operations, making it easier to understand the internal workings of the system.
+% This tool helps to track the state of blocks and address mappings, facilitating debugging and performance analysis.
+% It is a valuable resource for visualizing the impact of different FTL strategies and configurations on flash memory management.
+
+
+\end{document}

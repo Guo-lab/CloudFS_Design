@@ -1,0 +1,246 @@
+@startuml
+' left to right direction
+
+package "Cloud File System" {
+     class CloudFileSystemHandler <<abstract>> {
+        + virtual ~CloudFileSystemHandler() = default
+        + virtual void *cloudfsInit(struct fuse_conn_info *conn)
+        + virtual int cloudfsOpen(const char *path, struct fuse_file_info *fi) = 0
+        + virtual int cloudfsRead(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) = 0
+        + virtual int cloudfsWrite(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) = 0
+        + virtual int cloudfsRelease(const char *path, struct fuse_file_info *fi) = 0
+        + virtual int cloudfsTruncate(const char *path, off_t newsize) = 0
+        + virtual int cloudfsUnlink(const char *path) = 0
+        + virtual int cloudfsGetattr(const char *path, struct stat *statbuf)
+        + virtual int cloudfsGetxattr(const char *path, const char *name, char *value, size_t size)
+        + virtual int cloudfsSetxattr(const char *path, const char *name, const char *value, size_t size, int flags)
+        + virtual int cloudfsMknod(const char *path, mode_t mode, dev_t dev)
+        + virtual int cloudfsAccess(const char *path, int mask)
+        + virtual int cloudfsUtimens(const char *path, const struct timespec tv[2])
+        + virtual int cloudfsChmod(const char *path, mode_t mode)
+        + virtual int cloudfsMkdir(const char *path, mode_t mode)
+        + virtual int cloudfsOpendir(const char *path, struct fuse_file_info *fi)
+        + virtual int cloudfsReaddir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi)
+        + virtual int cloudfsRmdir(const char *path)
+        + virtual int cloudfsIoctl(const char *path, int cmd, void *arg, struct fuse_file_info *fi, unsigned int flags, void *data)
+    }
+
+    ' https://plantuml.com/component-diagram
+    ' https://plantuml.com/en-dark/class-diagram
+    class DedupCloudFileSystemHandler {
+        {method} void cloudfsDestroy(void *data)
+        {method} int cloudfsOpen(const char *path, struct fuse_file_info *fi) 
+        {method} int cloudfsRead(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) 
+        {method} int cloudfsWrite(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) 
+        {method} int cloudfsRelease(const char *path, struct fuse_file_info *fi) 
+        {method} int cloudfsUnlink(const char *path) override
+        {method} int cloudfsTruncate(const char *path, off_t newsize) 
+    }
+
+    class NoDedupCloudFileSystemHandler {
+        {method} void cloudfsDestroy(void *data) 
+        {method} int cloudfsOpen(const char *path, struct fuse_file_info *fi) 
+        {method} int cloudfsRead(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) 
+        {method} int cloudfsWrite(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) 
+        {method} int cloudfsRelease(const char *path, struct fuse_file_info *fi) 
+        {method} int cloudfsUnlink(const char *path) 
+        {method} int cloudfsTruncate(const char *path, off_t newsize) 
+    }
+
+
+    class CloudFileStorageDriver {
+        + cloudfs_state state_
+        + std::unordered_map<int, cloudfs_file_metadata> multiple_sessions
+        + DeduplicationManager* dedup_manager
+        + SnapshotManager* snapshot_manager
+        + CacheManager* cache_manager
+        + CloudFileStorageDriver()
+        + ~CloudFileStorageDriver()
+    }
+
+    class RabinChunker {
+        - rabinpoly_t* rp;
+        - EVP_MD_CTX* mdctx;
+        - const EVP_MD* md;
+        - unsigned char md_value[EVP_MAX_MD_SIZE];
+        - unsigned int md_len;
+        - off_t rabin_current_offset;
+        - size_t seg_len;
+        + RabinChunker(struct cloudfs_state* state)
+        + ~RabinChunker()
+        + std::vector<chunks_local_metadata> runRabinSegment(int fd, size_t size)
+        + std::vector<chunks_local_metadata> runRawRabinSegment(char* buftoread, size_t size)
+        + void resetRabinOffset(off_t rabin_curr)
+        - chunks_local_metadata getLastChunk()
+        - std::string convertBinaryToHex(const unsigned char* data, size_t length)
+    }
+
+    class DeduplicationManager {
+        - const char* GLOBAL_CHUNKS_FILE_NAME";
+        + std::unordered_map<std::string, chunks_global_metadata> global_chunk_container
+        + std::unordered_map<std::string, std::vector<chunks_local_metadata>> chunks_of_each_cloud_file
+        + DeduplicationManager(struct cloudfs_state* state)
+        + ~DeduplicationManager()
+        + bool saveGlobalChunksInfo()
+        + bool saveLocalChunksInfo(const std::string& file_path)
+        + bool loadGlobalChunksInfo()
+        + bool loadLocalChunksInfo(const std::string& file_path)
+        + int getChunkPositionIdx(const std::string& file_path, off_t offset, size_t size)
+        + off_t getChunkPosition(const std::string& file_path, int start_idx)
+        + std::vector<chunks_local_metadata>& getChunks(const std::string& file_path)
+        + bool checkForDuplicate(const std::string& hash)
+        + void addChunkReference(const std::string& hash)
+        + void removeChunkReference(const std::string& hash)
+        + void snapshotGlobalChunks()
+        + std::vector<std::string> collectKeys(const char* prefix)
+        + void deleteSnapshotInMemGlobalChunks(const std::vector<std::string>& hash_to_decrement)
+        + void deleteSnapshotSSDGlobalChunks(const char* prefix, const std::vector<std::string>& hash_to_decrement)
+        + chunks_global_metadata& getGlobalChunk(const std::string& hash)
+
+    }
+
+    class SnapshotManager {
+        - const char* SNAPSHOT_FILE
+        - const char* SNAPSHOT_INPUT_DIR
+        - const char* SNAPSHOT_META_FILE
+        - unsigned long timestamp
+        - std::vector<unsigned long> timestamp_list
+        - std::vector<unsigned long> installed_timestamp_list
+        + SnapshotManager()
+        + ~SnapshotManager()
+        + bool saveSnapshotMetadata()
+        + bool loadSnapshotMetadata()
+        + void initSnapshot()
+        + unsigned long createSnapshot(int fd)
+        + unsigned long* listSnapshots(int fd)
+        + int restoreSnapshot(int fd, unsigned long timestamp)
+        + int installSnapshot(unsigned long timestamp)
+        + int uninstallSnapshot(unsigned long timestamp)
+        + int deleteSnapshot(unsigned long timestamp)
+        + int cleanDirectory(const char* path)
+        + int updateSnapshotsChunkReferenceCount
+        + unsigned long timestamp, const std::vector<std::string>& hash_to_decrement)
+    }
+
+    class CacheManager {
+        - const char* CACHE_DIR
+        - const char* CACHE_META_FILE
+        - size_t current_cache_size
+        - size_t cache_capacity
+        - std::list<ChunkNode> lru_doubly_linked_list
+        - std::unordered_map<std::string, std::list<ChunkNode>::iterator> lru_cache
+        - void moveNodeToFront(const std::string& key)
+        - void evictCacheNodeIfNecessary()
+        + std::string CACHE_FULL_PATH
+        + bool cacheable
+        + CacheManager(size_t capacity, const char* SSD_PATH)
+        + ~CacheManager()
+        + void saveCache()
+        + void loadCache()
+        + void putCacheNode(const std::string& key, chunks_global_metadata value)
+        + void evictCacheNode(const std::string& key)
+        + ChunkNode* accessCacheNode(const std::string& key)
+        + void addChunkNodeReferenceCount(const std::string& key)
+        + void removeChunkNodeReferenceCount(const std::string& key)
+        + void printCache()
+    }
+    
+    struct cloudfs_state {
+        char ssd_path[MAX_PATH_LEN]
+        char hostname[MAX_HOSTNAME_LEN]
+        int ssd_size
+        int cache_size
+        int threshold
+        int avg_seg_size
+        int min_seg_size
+        int max_seg_size
+        int rabin_window_size
+        char no_dedup
+    }
+
+    struct cloudfs_file_metadata {
+        char file_name[MAX_META_FIELD_LEN]
+        int file_size
+        bool is_dirty
+    }
+
+    struct chunks_global_metadata {
+        int ref_count
+        size_t chunk_size
+        bool is_dirty
+    }
+    
+    ' https://www.visual-paradigm.com/guide/uml-unified-modeling-language/uml-class-diagram-tutorial/
+    
+    struct chunks_local_metadata {
+        std::string chunk_hash
+        off_t chunk_position
+        size_t chunk_size
+        chunks_local_metadata()
+        \~chunks_local_metadata()
+        chunks_local_metadata(chunks_local_metadata&&)
+        chunks_local_metadata& operator=(chunks_local_metadata&&)
+        chunks_local_metadata(const chunks_local_metadata&)
+        chunks_local_metadata& operator=(const chunks_local_metadata&)
+    }
+
+    struct ChunkNode {
+        std::string key
+        chunks_global_metadata metadata
+        ChunkNode(const std::string& k, const chunks_global_metadata& meta)
+    }
+    
+    ' class ChunksManager {
+    '     + int chunk_start_idx
+    '     + int chunk_end_idx
+    '     + off_t chunk_range
+    '     + off_t chunk_start_offset
+    '     + off_t chunk_end_offset
+    '     + ChunksManager()
+    '     + ~ChunksManager()
+    '     + void setChunksRange(std::vector<chunks_local_metadata>& chunks_list)
+    '     + off_t transferFromCloudBufferToChunk(int fd, int buf_fd, off_t offset, size_t size)
+    '     + void downloadCloudFileChunks(const char* full_path, struct timespec* tmp_tv)
+    '     + off_t transferChunkToCloudBuffer(int fd, int buf_fd, off_t offset, size_t size)
+    '     + void uploadChunksOfCloudFile(int fd, int infile_fd, const char* full_path, const std::vector<chunks_local_metadata>& rabin_chunks, std::vector<chunks_local_metadata>& file_chunks)
+    '     + void convertFileToChunks(off_t offset, size_t size, struct cloudfs_file_metadata& file_metadata)
+    '     + void rechunkLocalCopy(off_t offset, size_t size, struct cloudfs_file_metadata& file_metadata)
+    '     + void pruneChunks(const char* full_path)
+    '     + void clearChunks(const char* full_path)
+    ' }
+    class ChunksManager {
+        + int chunk_start_idx
+        + int chunk_end_idx
+        + off_t chunk_range
+        + off_t chunk_start_offset
+        + off_t chunk_end_offset
+        + ChunksManager()
+        + ~ChunksManager()
+        + void setChunksRange() <<omit>>
+        + off_t transferFromCloudBufferToChunk() <<omit>>
+        + void downloadCloudFileChunks() <<omit>>
+        + off_t transferChunkToCloudBuffer() <<omit>>
+        + void uploadChunksOfCloudFile() <<omit>>
+        + void convertFileToChunks() <<omit>>
+        + void rechunkLocalCopy() <<omit>>
+        + void pruneChunks() <<omit>>
+        + void clearChunks() <<omit>>
+    }
+
+    CloudFileSystemHandler <|-- DedupCloudFileSystemHandler
+    CloudFileSystemHandler <|-- NoDedupCloudFileSystemHandler
+    DedupCloudFileSystemHandler *-- ChunksManager
+    CloudFileStorageDriver *--> CloudFileSystemHandler
+    CloudFileStorageDriver *-- DeduplicationManager
+    CloudFileStorageDriver *-- SnapshotManager
+    CloudFileStorageDriver *-- CacheManager
+    CloudFileStorageDriver *-- cloudfs_state
+    CloudFileStorageDriver *-- cloudfs_file_metadata
+    DeduplicationManager *-- chunks_global_metadata
+    DeduplicationManager *-- chunks_local_metadata
+    DeduplicationManager *-- RabinChunker
+    CacheManager *-- ChunkNode
+    ChunkNode *-- chunks_global_metadata
+}
+
+@enduml
